@@ -266,9 +266,14 @@ async def notify_overdues(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print("notify error:", e)
 
+# >>> ДОБАВЛЕНО: post_init, чтобы job_queue был инициализирован
+async def _post_init(app: Application):
+    app.job_queue.run_repeating(notify_overdues, interval=60*60*12, first=60)
+
 # ---------- Сборка приложения ----------
 def build_app() -> Application:
-    app = ApplicationBuilder().token(TOKEN).build()
+    # >>> ИЗМЕНЕНО: регистрируем post_init здесь
+    app = ApplicationBuilder().token(TOKEN).post_init(_post_init).build()
 
     conv_tx = ConversationHandler(
         entry_points=[
@@ -307,9 +312,6 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(debt_cb, pattern=r"^debt_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, quick_add))
 
-    # Раз в 12 часов — напоминания о просрочках
-    app.job_queue.run_repeating(notify_overdues, interval=60*60*12, first=60)
-
     return app
 
 async def _boot():
@@ -323,4 +325,3 @@ async def _boot():
 
 if __name__ == "__main__":
     asyncio.run(_boot())
-
