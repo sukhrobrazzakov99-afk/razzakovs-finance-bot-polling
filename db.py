@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import sqlite3, time
 
@@ -41,7 +40,7 @@ class DB:
         """)
         self.conn.commit()
 
-    # --- allowlist ---
+    # allowlist
     def allow(self, user_id: int):
         self.conn.execute("INSERT OR IGNORE INTO allowed_users(user_id) VALUES(?)", (user_id,))
         self.conn.commit()
@@ -55,9 +54,9 @@ class DB:
         return int(r["c"])
 
     def list_allowed_ids(self):
-        return [row["user_id"] for row in self.conn.execute("SELECT user_id FROM allowed_users")]
+        return [r["user_id"] for r in self.conn.execute("SELECT user_id FROM allowed_users")]
 
-    # --- transactions ---
+    # transactions
     def add_tx(self, user_id, type_, amount, currency, category, note):
         self.conn.execute(
             "INSERT INTO transactions(user_id,type,amount,currency,category,note,created_at) VALUES(?,?,?,?,?,?,?)",
@@ -82,7 +81,17 @@ class DB:
         ).fetchone()["s"]
         return float(inc or 0), float(exp or 0), float((inc or 0) - (exp or 0))
 
-    # --- debts ---
+    def totals_by_category(self, user_id, type_, start_ts=None, end_ts=None):
+        q = "SELECT COALESCE(category,'Без категории') cat, SUM(amount) s FROM transactions WHERE user_id=? AND type=?"
+        args = [user_id, type_]
+        if start_ts is not None:
+            q += " AND created_at>=?"; args.append(int(start_ts))
+        if end_ts is not None:
+            q += " AND created_at<?"; args.append(int(end_ts))
+        q += " GROUP BY cat ORDER BY s DESC"
+        return self.conn.execute(q, tuple(args)).fetchall()
+
+    # debts
     def add_debt(self, user_id, kind, cp_name, amount, currency, note, due_ts):
         self.conn.execute(
             "INSERT INTO debts(user_id,kind,cp_name,amount,currency,note,due_date,status,created_at) VALUES(?,?,?,?,?,?,?, 'open', ?)",
