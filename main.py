@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import asyncio  # <— нужно для get_running_loop
 from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -47,7 +48,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return
     inc, exp, net = db.get_balance(update.effective_user.id)
     rec, pay = db.get_debt_totals(update.effective_user.id)
@@ -61,7 +62,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(txt, reply_markup=menu_kb())
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return
     rows = db.last_tx(update.effective_user.id, 20)
     if not rows:
@@ -76,7 +77,7 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- ДОХОД / РАСХОД ----------
 async def ask_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return
     context.user_data.clear()
     context.user_data["mode"] = "income"
@@ -87,7 +88,7 @@ async def ask_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ADD_AMOUNT
 
 async def ask_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return
     context.user_data.clear()
     context.user_data["mode"] = "expense"
@@ -98,7 +99,7 @@ async def ask_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ADD_AMOUNT
 
 async def got_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return ConversationHandler.END
     text = update.message.text or ""
     if text.lower() == "отмена":
@@ -114,7 +115,7 @@ async def got_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ADD_DESC
 
 async def got_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return ConversationHandler.END
     note = update.message.text or None
     db.add_tx(
@@ -142,13 +143,13 @@ def debt_menu_markup(kind: str):
     ])
 
 async def debtors_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return
     await update.message.reply_text("Дебиторы — выберите действие:", reply_markup=menu_kb())
     await update.message.reply_text("Меню:", reply_markup=debt_menu_markup("receivable"))
 
 async def creditors_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return
     await update.message.reply_text("Кредиторы — выберите действие:", reply_markup=menu_kb())
     await update.message.reply_text("Меню:", reply_markup=debt_menu_markup("payable"))
@@ -195,7 +196,7 @@ async def debt_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(f"Всего {label}: {total:.2f}")
 
 async def debt_get_cp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return ConversationHandler.END
     text = update.message.text or ""
     if text.lower() == "отмена":
@@ -206,7 +207,7 @@ async def debt_get_cp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return DEBT_AMOUNT
 
 async def debt_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return ConversationHandler.END
     p = parse_free_text(update.message.text or "")
     if not p.get("amount"):
@@ -218,7 +219,7 @@ async def debt_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return DEBT_DUE
 
 async def debt_get_due(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return ConversationHandler.END
     t = (update.message.text or "").strip()
     due_ts = None if t == "-" else parse_due(t)
@@ -230,7 +231,7 @@ async def debt_get_due(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return DEBT_NOTE
 
 async def debt_get_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return ConversationHandler.END
     d = context.user_data
     db.add_debt(
@@ -246,7 +247,7 @@ async def debt_get_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def debt_close_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return ConversationHandler.END
     t = (update.message.text or "").strip()
     if t.lower() == "отмена":
@@ -266,7 +267,7 @@ async def debt_close_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Быстрая запись ----------
 async def quick_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update): 
+    if not is_allowed(update):
         return
     p = parse_free_text(update.message.text or "")
     if p.get("amount"):
@@ -305,11 +306,11 @@ async def _post_init(app: Application):
     except Exception as e:
         print("delete_webhook warning:", e)
 
-    # Гарантируем наличие JobQueue (если None — создаём и привязываем)
+    # Если job_queue ещё нет — создаём с текущим event loop
     if app.job_queue is None:
-        jq = JobQueue()
+        jq = JobQueue(loop=asyncio.get_running_loop())
         jq.set_application(app)
-        app.job_queue = jq  # app.run_polling() запустит её
+        app.job_queue = jq  # app.run_polling() запустит её автоматически
 
     # Планируем напоминания
     app.job_queue.run_repeating(
