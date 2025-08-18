@@ -9,7 +9,7 @@ from telegram.ext import (
 from ai_helper import parse_free_text, parse_due
 from db import DB
 
-# === ТОКЕН (вшитый) ===
+# === ТОКЕН (вшитый, как просил) ===
 TOKEN = "7611168200:AAGh606TQAZ0MwlXXwHsxQyybGflV5nRJPk"
 
 # Разрешённые пользователи (по username)
