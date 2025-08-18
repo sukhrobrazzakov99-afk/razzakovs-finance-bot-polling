@@ -9,8 +9,8 @@ from telegram.ext import (
 from ai_helper import parse_free_text, parse_due
 from db import DB
 
-# === ТОКЕН (вшитый, как просил) ===
-TOKEN = "7611168200:AAGh606TQAZ0MwlXXwHsxQyybGflV5nRJPk"
+# === ТОКЕН (новый) ===
+TOKEN = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
 
 # Разрешённые пользователи (по username)
 OWNER_USERNAMES = ["SukhrobAbdurazzakov", "revivemd"]
@@ -113,11 +113,9 @@ async def got_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Не распознал сумму. Ещё раз или Отмена:"); return ADD_AMOUNT
     context.user_data["amount"] = float(p["amount"])
     context.user_data["currency"] = p.get("currency", "UZS")
-    # если из текста угадали категорию — сразу к комментарию
     if p.get("category"):
         context.user_data["category"] = p["category"]
         await update.message.reply_text("Комментарий (можно пусто):"); return ADD_NOTE
-    # иначе предложим выбор категории
     await update.message.reply_text(
         "Выберите категорию (или 'Пропустить'):",
         reply_markup=cat_kb(context.user_data["mode"])
@@ -307,13 +305,11 @@ async def notify_overdues(context: ContextTypes.DEFAULT_TYPE):
             print("notify error:", e)
 
 async def _post_init(app: Application):
-    # снимаем вебхук на всякий случай
     try:
         await app.bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
         print("delete_webhook warning:", e)
 
-    # Гарантируем наличие JobQueue (если пакет job-queue не установлен — просто без напоминаний)
     try:
         if app.job_queue is None:
             jq = JobQueue(loop=asyncio.get_running_loop())
@@ -340,7 +336,6 @@ def build_app() -> Application:
         allow_reentry=True,
     )
 
-    # Явно фиксируем режим трекинга — предупреждение PTB пропадёт
     conv_debt = ConversationHandler(
         entry_points=[CallbackQueryHandler(debt_cb, pattern=r"^debt_")],
         states={
