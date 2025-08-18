@@ -307,7 +307,7 @@ async def notify_overdues(context: ContextTypes.DEFAULT_TYPE):
             print("notify error:", e)
 
 async def _post_init(app: Application):
-    # снимаем вебхук на всякий
+    # снимаем вебхук на всякий случай
     try:
         await app.bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
@@ -340,6 +340,7 @@ def build_app() -> Application:
         allow_reentry=True,
     )
 
+    # Явно фиксируем режим трекинга — предупреждение PTB пропадёт
     conv_debt = ConversationHandler(
         entry_points=[CallbackQueryHandler(debt_cb, pattern=r"^debt_")],
         states={
@@ -350,6 +351,9 @@ def build_app() -> Application:
             DEBT_CLOSE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, debt_close_id)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        per_chat=True,
+        per_user=True,
+        per_message=False,
         allow_reentry=True,
     )
 
@@ -371,5 +375,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
