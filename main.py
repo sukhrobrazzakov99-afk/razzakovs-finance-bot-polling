@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 import asyncio
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
@@ -12,24 +13,21 @@ from db import DB
 # === ТОКЕН (новый) ===
 TOKEN = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
 
-# Разрешённые пользователи (по username)
-OWNER_USERNAMES = ["SukhrobAbdurazzakov", "revivemd"]
+# Webhook-переменные (задаём в Railway → Settings → Variables)
+WEBHOOK_BASE = os.getenv("WEBHOOK_URL")  # например: https://beautiful-love.up.railway.app
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", TOKEN.split(":")[1])
+PORT = int(os.getenv("PORT", "8080"))
 
+OWNER_USERNAMES = ["SukhrobAbdurazzakov", "revivemd"]
 db = DB("data.sqlite")
 
-# Состояния
 ADD_AMOUNT, ADD_CATEGORY, ADD_NOTE, DEBT_CP, DEBT_AMOUNT, DEBT_DUE, DEBT_NOTE, DEBT_CLOSE_ID = range(8)
 
 EXPENSE_CATS = ["Еда", "Транспорт", "Жильё", "Связь/интернет", "Здоровье", "Одежда", "Развлечения", "Образование", "Подарки", "Другое"]
 INCOME_CATS  = ["Зарплата", "Бонус", "Подарок", "Другое"]
 
 def menu_kb():
-    rows = [
-        ["➕ Доход", "➖ Расход"],
-        ["💰 Баланс", "📒 История"],
-        ["📊 Отчёт", "🤝 Дебиторы"],
-        ["💳 Кредиторы"],
-    ]
+    rows = [["➕ Доход", "➖ Расход"], ["💰 Баланс", "📒 История"], ["📊 Отчёт", "🤝 Дебиторы"], ["💳 Кредиторы"]]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def cat_kb(mode: str):
@@ -46,7 +44,6 @@ def is_allowed(update: Update) -> bool:
         return True
     return db.is_allowed(u.id)
 
-# ---------------- БАЗА ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         if db.allow_count() < 2:
@@ -60,19 +57,15 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        return
+    if not is_allowed(update): return
     inc, exp, net = db.get_balance(update.effective_user.id)
     rec, pay = db.get_debt_totals(update.effective_user.id)
-    txt = (
-        f"Доходы: {inc:.2f}\nРасходы: {exp:.2f}\nИтого: {net:.2f}\n"
-        f"Дебиторы (вам должны): {rec:.2f}\nКредиторы (вы должны): {pay:.2f}"
-    )
+    txt = (f"Доходы: {inc:.2f}\nРасходы: {exp:.2f}\nИтого: {net:.2f}\n"
+           f"Дебиторы (вам должны): {rec:.2f}\nКредиторы (вы должны): {pay:.2f}")
     await update.message.reply_text(txt, reply_markup=menu_kb())
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        return
+    if not is_allowed(update): return
     rows = db.last_tx(update.effective_user.id, 20)
     if not rows:
         await update.message.reply_text("Пока пусто.", reply_markup=menu_kb()); return
@@ -84,23 +77,18 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{when} • {sign}{r['amount']} {r['currency']} • {cat}")
     await update.message.reply_text("\n".join(lines), reply_markup=menu_kb())
 
-# -------- Доход/Расход с категориями --------
 async def ask_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update): return
     context.user_data.clear(); context.user_data["mode"] = "income"
-    await update.message.reply_text(
-        "Доход: сумма (напр. 120000 или 20 USD):",
-        reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
-    )
+    await update.message.reply_text("Доход: сумма (напр. 120000 или 20 USD):",
+                                    reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True))
     return ADD_AMOUNT
 
 async def ask_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update): return
     context.user_data.clear(); context.user_data["mode"] = "expense"
-    await update.message.reply_text(
-        "Расход: сумма (напр. 120000 или 20 USD):",
-        reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
-    )
+    await update.message.reply_text("Расход: сумма (напр. 120000 или 20 USD):",
+                                    reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True))
     return ADD_AMOUNT
 
 async def got_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -116,36 +104,24 @@ async def got_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if p.get("category"):
         context.user_data["category"] = p["category"]
         await update.message.reply_text("Комментарий (можно пусто):"); return ADD_NOTE
-    await update.message.reply_text(
-        "Выберите категорию (или 'Пропустить'):",
-        reply_markup=cat_kb(context.user_data["mode"])
-    )
+    await update.message.reply_text("Выберите категорию (или 'Пропустить'):", reply_markup=cat_kb(context.user_data["mode"]))
     return ADD_CATEGORY
 
 async def got_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update): return ConversationHandler.END
     cat = update.message.text or ""
-    if cat == "Пропустить":
-        context.user_data["category"] = None
-    else:
-        context.user_data["category"] = cat
-    await update.message.reply_text(
-        "Комментарий (можно пусто):",
-        reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
-    )
+    context.user_data["category"] = None if cat == "Пропустить" else cat
+    await update.message.reply_text("Комментарий (можно пусто):",
+                                    reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True))
     return ADD_NOTE
 
 async def got_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update): return ConversationHandler.END
     note = update.message.text or None
-    db.add_tx(
-        update.effective_user.id,
-        context.user_data.get("mode"),
-        float(context.user_data.get("amount", 0)),
-        context.user_data.get("currency", "UZS"),
-        context.user_data.get("category"),
-        note,
-    )
+    db.add_tx(update.effective_user.id, context.user_data.get("mode"),
+              float(context.user_data.get("amount", 0)),
+              context.user_data.get("currency", "UZS"),
+              context.user_data.get("category"), note)
     await update.message.reply_text("✅ Сохранено.", reply_markup=menu_kb())
     return ConversationHandler.END
 
@@ -153,31 +129,24 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отменено.", reply_markup=menu_kb())
     return ConversationHandler.END
 
-# ------------- Отчёт по категориям -------------
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update): return
     now = datetime.now()
     start = datetime(now.year, now.month, 1)
     end = (start + timedelta(days=32)).replace(day=1)
     s_ms, e_ms = int(start.timestamp()*1000), int(end.timestamp()*1000)
-
     ei = db.totals_by_category(update.effective_user.id, "income", s_ms, e_ms)
     ee = db.totals_by_category(update.effective_user.id, "expense", s_ms, e_ms)
-
     lines = ["📊 Отчёт за текущий месяц:"]
     if ei:
         lines.append("\nДоходы:")
-        for r in ei:
-            lines.append(f"• {r['cat']}: {r['s']:.2f}")
+        for r in ei: lines.append(f"• {r['cat']}: {r['s']:.2f}")
     if ee:
         lines.append("\nРасходы:")
-        for r in ee:
-            lines.append(f"• {r['cat']}: {r['s']:.2f}")
-    if not ei and not ee:
-        lines.append("Нет данных.")
+        for r in ee: lines.append(f"• {r['cat']}: {r['s']:.2f}")
+    if not ei and not ee: lines.append("Нет данных.")
     await update.message.reply_text("\n".join(lines), reply_markup=menu_kb())
 
-# -------- Дебиторы/Кредиторы --------
 def debt_menu_markup(kind: str):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Новый", callback_data=f"debt_{kind}_new"),
@@ -209,7 +178,8 @@ async def debt_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.endswith("_list"):
         kind = "receivable" if "receivable" in data else "payable"
         rows = db.open_debts(update.effective_user.id, kind)
-        if not rows: await q.message.reply_text("Открытых долгов нет.")
+        if not rows:
+            await q.message.reply_text("Открытых долгов нет.")
         else:
             lines = [f"ID#{r['id']} • {r['cp_name']} • {r['amount']} {r['currency']} • "
                      f"до {datetime.fromtimestamp(r['due_date']/1000).strftime('%d.%m.%Y') if r['due_date'] else '—'}"
@@ -272,44 +242,34 @@ async def debt_close_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Закрыто." if ok else "Не найден открытый долг с таким ID.", reply_markup=menu_kb())
     return ConversationHandler.END
 
-# ---------- Быстрая запись ----------
 async def quick_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update): return
     p = parse_free_text(update.message.text or "")
     if p.get("amount"):
-        db.add_tx(
-            update.effective_user.id,
-            p.get("mode","expense"),
-            float(p["amount"]),
-            p.get("currency","UZS"),
-            p.get("category"),
-            p.get("note"),
-        )
+        db.add_tx(update.effective_user.id, p.get("mode","expense"),
+                  float(p["amount"]), p.get("currency","UZS"),
+                  p.get("category"), p.get("note"))
         await update.message.reply_text("✅ Записал. Напишите 'баланс', 'история' или 'отчёт'.", reply_markup=menu_kb())
     else:
         await update.message.reply_text("Не понял. Нажмите кнопки или напишите 'меню'.", reply_markup=menu_kb())
 
-# ---------- Напоминания (JobQueue) ----------
 async def notify_overdues(context: ContextTypes.DEFAULT_TYPE):
     for uid in db.list_allowed_ids():
         rows = db.overdue_debts(uid)
         if not rows: continue
-        lines = [
-            f"ID#{r['id']} • {r['cp_name']} • {r['amount']} {r['currency']} • "
-            f"срок был {datetime.fromtimestamp(r['due_date']/1000).strftime('%d.%m.%Y')}"
-            for r in rows
-        ]
+        lines = [f"ID#{r['id']} • {r['cp_name']} • {r['amount']} {r['currency']} • "
+                 f"срок был {datetime.fromtimestamp(r['due_date']/1000).strftime('%d.%m.%Y')}" for r in rows]
         try:
             await context.bot.send_message(uid, "🔔 Просроченные долги:\n" + "\n".join(lines))
         except Exception as e:
             print("notify error:", e)
 
 async def _post_init(app: Application):
+    # при polling снимаем вебхук; при webhook run_webhook установит новый сам
     try:
         await app.bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
         print("delete_webhook warning:", e)
-
     try:
         if app.job_queue is None:
             jq = JobQueue(loop=asyncio.get_running_loop())
@@ -323,10 +283,8 @@ def build_app() -> Application:
     app = ApplicationBuilder().token(TOKEN).post_init(_post_init).build()
 
     conv_tx = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Regex(r"^\+|^➕|^Доход$"), ask_income),
-            MessageHandler(filters.Regex(r"^\-|^➖|^Расход$"), ask_expense),
-        ],
+        entry_points=[MessageHandler(filters.Regex(r"^\+|^➕|^Доход$"), ask_income),
+                      MessageHandler(filters.Regex(r"^\-|^➖|^Расход$"), ask_expense)],
         states={
             ADD_AMOUNT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_amount)],
             ADD_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_category)],
@@ -346,10 +304,7 @@ def build_app() -> Application:
             DEBT_CLOSE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, debt_close_id)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        per_chat=True,
-        per_user=True,
-        per_message=False,
-        allow_reentry=True,
+        per_chat=True, per_user=True, per_message=False, allow_reentry=True,
     )
 
     app.add_handler(CommandHandler("start", start))
@@ -366,9 +321,18 @@ def build_app() -> Application:
 
 def main():
     app = build_app()
-    app.run_polling(drop_pending_updates=True)
+    if WEBHOOK_BASE:
+        base = WEBHOOK_BASE.rstrip("/")
+        url = f"{base}/{WEBHOOK_SECRET}"
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=WEBHOOK_SECRET,
+            webhook_url=url,
+            drop_pending_updates=True,
+        )
+    else:
+        app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
-
-
