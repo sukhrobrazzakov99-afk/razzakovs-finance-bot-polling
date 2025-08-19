@@ -1,6 +1,6 @@
-# main.py — Телеграм-бот с "AI"-разбором текста (эвристики, без внешних ключей),
-# учётом доходов/расходов (SQLite) и webhook для Railway.
-# Библиотеки: python-telegram-bot==21.4
+# main.py — Телеграм-бот с офлайн "AI"-разбором текста (эвристики), учётом доходов/расходов (SQLite)
+# и webhook под Railway. Ничего дописывать не нужно.
+# Требует: python-telegram-bot[webhooks]==21.4
 
 import os
 import re
@@ -10,16 +10,14 @@ import logging
 from datetime import datetime
 from typing import Optional, Tuple
 
-from telegram import (
-    Update, ReplyKeyboardMarkup, KeyboardButton
-)
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters
 )
 
-# === ЗАПОЛНЕНО: твой токен и адрес вебхука Railway ===
+# === ЗАПОЛНЕНО: токен и адрес Railway (webhook) ===
 BOT_TOKEN = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
-WEBHOOK_URL = "https://beautiful-love.up.railway.app"
+WEBHOOK_URL = "https://beautiful-love.up.railway.app"  # адрес твоего деплоя Railway
 PORT = int(os.environ.get("PORT", "8080"))
 
 # === ЛОГИ ===
@@ -50,6 +48,7 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_user_ts ON tx(user_id, ts)")
     con.commit()
     con.close()
+
 init_db()
 
 # === КЛАВИАТУРА ===
@@ -62,7 +61,7 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# === ЭВРИСТИКИ ("AI" без внешнего API) ===
+# === ЭВРИСТИКИ ("AI" без внешних API) ===
 CURRENCY_SIGNS = {
     "usd": ["$", "usd", "дол", "доллар"],
     "uzs": ["сум", "sum", "uzs", "сумы", "сумов"]
@@ -122,21 +121,16 @@ def ai_classify_finance(text: str) -> Tuple[str, Optional[float], str, str]:
     return ttype, amount, currency, category
 
 def ai_chat_reply(text: str) -> str:
-    """Простой офлайн-«ассистент»: короткие полезные ответы без внешних API."""
     t = text.strip().lower()
-    # мини-навигация
     if any(w in t for w in ["как добавить", "как внести", "что писать", "помощ"]):
-        return ("Пиши простым текстом, напр.: «самса 18 000 сум», «такси 25 000», «зарплата 800$».\n"
+        return ("Пиши простым текстом: «самса 18 000 сум», «такси 25 000», «зарплата 800$».\n"
                 "Кнопки: Баланс, История, Отчёт (месяц).")
-    # быстрый FAQ по финансам
     if "баланс" in t:
-        return "Нажми кнопку «💰 Баланс» — покажу остатки по UZS и USD."
+        return "Нажми «💰 Баланс» — покажу остатки по UZS и USD."
     if any(w in t for w in ["отчёт", "отчет", "месяц"]):
         return "Нажми «📊 Отчёт (месяц)» — дам суммарно доход/расход и баланс за текущий месяц."
-    # мини-советы
     if any(w in t for w in ["копить", "эконом", "совет", "как сэкономить"]):
-        return "Совет: фиксируй все траты 7 дней, потом урежь топ-3 категории на 20%. Это даёт +10–15% к чистой прибыли."
-    # fallback
+        return "Совет: фиксируй все траты 7 дней, потом урежь топ-3 категории на 20% — обычно это +10–15% к чистой прибыли."
     return "Принято ✅ Могу разобрать финансовую фразу или показать баланс/историю кнопками ниже."
 
 # === РАБОТА С БД ===
@@ -164,7 +158,7 @@ def get_balance(user_id: int) -> Tuple[float, float]:
 
 def month_report(user_id: int, y: int, m: int):
     start = int(datetime(y, m, 1).timestamp())
-    end = int(datetime(y + (m==12), (m % 12) + 1, 1).timestamp())
+    end = int(datetime(y + (m == 12), (m % 12) + 1, 1).timestamp())
     con = sqlite3.connect(DB_PATH)
     c = con.cursor()
     def sum_where(ttype, cur):
@@ -190,7 +184,7 @@ def last_txs(user_id: int, limit: int = 10):
 async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Razzakov’s Finance 🤖\n"
-        "Пиши: «самса 18 000 сум», «такси 25 000», «зарплата 800$» — я сам разберу и сохраню.\n"
+        "Пиши: «самса 18 000 сум», «такси 25 000», «зарплата 800$» — разберу и сохраню.\n"
         "Кнопки снизу — быстрые функции.",
         reply_markup=MAIN_KB
     )
@@ -224,7 +218,7 @@ async def report_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     now = datetime.now()
     inc_uzs, exp_uzs, inc_usd, exp_usd = month_report(uid, now.year, now.month)
-    bal_uzs = inc_uzs - exp_uzs
+    bal_uzs = inc_uzs - exp_узs
     bal_usd = inc_usd - exp_usd
     msg = (
         f"Отчёт за {now.strftime('%B %Y')}:\n"
@@ -249,7 +243,7 @@ async def text_router(update: Update, _: ContextTypes.DEFAULT_TYPE):
     if "ai" in low or "🤖" in low:
         await ai_button(update, _); return
 
-    # Пытаемся распарсить как финансовую транзакцию
+    # Пробуем распарсить как финансовую транзакцию
     ttype, amount, currency, category = ai_classify_finance(text)
     if amount is not None:
         add_tx(uid, ttype, amount, currency, category, text)
@@ -260,7 +254,7 @@ async def text_router(update: Update, _: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Если это не транзакция — даём AI-подсказку
+    # Иначе — короткий AI-совет
     reply = ai_chat_reply(text)
     await update.message.reply_text(reply, reply_markup=MAIN_KB)
 
@@ -276,7 +270,6 @@ def main():
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
     log.info("Starting webhook on port %s ...", PORT)
-    # PTB сам поставит webhook на указанный URL
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
@@ -286,4 +279,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
