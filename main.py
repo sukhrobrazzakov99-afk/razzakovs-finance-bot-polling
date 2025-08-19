@@ -1,6 +1,5 @@
-# main.py — Телеграм-бот с офлайн "AI"-разбором текста (эвристики), учётом доходов/расходов (SQLite)
-# и webhook под Railway. Ничего дописывать не нужно.
-# Требует: python-telegram-bot[webhooks]==21.4
+# main.py — Телеграм-бот: офлайн "AI" (эвристики), SQLite, webhook для Railway.
+# Совместимо с python-telegram-bot[webhooks]==21.4
 
 import os
 import re
@@ -11,16 +10,14 @@ from datetime import datetime
 from typing import Optional, Tuple
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# === ЗАПОЛНЕНО: токен и адрес Railway (webhook) ===
-BOT_TOKEN = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
-WEBHOOK_URL = "https://beautiful-love.up.railway.app"  # адрес твоего деплоя Railway
+# ==== ЗАПОЛНЕНО: токен и вебхук ====
+BOT_TOKEN  = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
+WEBHOOK_URL = "https://beautiful-love.up.railway.app"   # адрес твоего Railway
 PORT = int(os.environ.get("PORT", "8080"))
 
-# === ЛОГИ ===
+# ==== ЛОГИ ====
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     level=logging.INFO
@@ -29,7 +26,7 @@ log = logging.getLogger("razzakovs-ai-bot")
 
 DB_PATH = "finance.db"
 
-# === ИНИЦИАЛИЗАЦИЯ БД ===
+# ==== ИНИЦИАЛИЗАЦИЯ БД ====
 def init_db():
     con = sqlite3.connect(DB_PATH)
     c = con.cursor()
@@ -51,7 +48,7 @@ def init_db():
 
 init_db()
 
-# === КЛАВИАТУРА ===
+# ==== КЛАВИАТУРА ====
 MAIN_KB = ReplyKeyboardMarkup(
     [
         [KeyboardButton("➕ Доход"), KeyboardButton("➖ Расход")],
@@ -61,7 +58,7 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# === ЭВРИСТИКИ ("AI" без внешних API) ===
+# ==== ЭВРИСТИКИ ("AI" без внешнего API) ====
 CURRENCY_SIGNS = {
     "usd": ["$", "usd", "дол", "доллар"],
     "uzs": ["сум", "sum", "uzs", "сумы", "сумов"]
@@ -86,12 +83,12 @@ def detect_currency(text: str) -> str:
     return "uzs"
 
 def parse_amount(text: str) -> Optional[float]:
-    # находим 120000 / 120 000 / 120,000 / 12.5 / 12,5
+    # 120000 / 120 000 / 120,000 / 12.5 / 12,5
     m = re.findall(r"(?:(?<=\s)|^)(\d{1,3}(?:[ \u00A0,\.]\d{3})+|\d+)(?:[.,](\d{1,2}))?", text)
     if not m:
         return None
     raw, frac = m[-1]
-    num = re.sub(r"[ \u00A0,\.]", "", raw)  # убираем разделители тысяч
+    num = re.sub(r"[ \u00A0,\.]", "", raw)
     if frac:
         return float(f"{num}.{frac}")
     return float(num)
@@ -114,26 +111,22 @@ def guess_category(text: str) -> str:
     return "Прочее"
 
 def ai_classify_finance(text: str) -> Tuple[str, Optional[float], str, str]:
-    ttype = guess_type(text)
-    amount = parse_amount(text)
-    currency = detect_currency(text)
-    category = guess_category(text)
-    return ttype, amount, currency, category
+    return guess_type(text), parse_amount(text), detect_currency(text), guess_category(text)
 
 def ai_chat_reply(text: str) -> str:
     t = text.strip().lower()
     if any(w in t for w in ["как добавить", "как внести", "что писать", "помощ"]):
-        return ("Пиши простым текстом: «самса 18 000 сум», «такси 25 000», «зарплата 800$».\n"
+        return ("Пиши: «самса 18 000 сум», «такси 25 000», «зарплата 800$».\n"
                 "Кнопки: Баланс, История, Отчёт (месяц).")
     if "баланс" in t:
-        return "Нажми «💰 Баланс» — покажу остатки по UZS и USD."
+        return "Нажми «💰 Баланс» — покажу UZS и USD."
     if any(w in t for w in ["отчёт", "отчет", "месяц"]):
-        return "Нажми «📊 Отчёт (месяц)» — дам суммарно доход/расход и баланс за текущий месяц."
+        return "Нажми «📊 Отчёт (месяц)» — дам доход/расход и баланс."
     if any(w in t for w in ["копить", "эконом", "совет", "как сэкономить"]):
-        return "Совет: фиксируй все траты 7 дней, потом урежь топ-3 категории на 20% — обычно это +10–15% к чистой прибыли."
-    return "Принято ✅ Могу разобрать финансовую фразу или показать баланс/историю кнопками ниже."
+        return "Совет: фиксируй траты 7 дней и урежь топ-3 категории на 20% — обычно +10–15% к чистой прибыли."
+    return "Принято ✅ Могу разобрать финансовую фразу или показать баланс/историю кнопками."
 
-# === РАБОТА С БД ===
+# ==== РАБОТА С БД ====
 def add_tx(user_id: int, ttype: str, amount: float, currency: str, category: str, note: str):
     con = sqlite3.connect(DB_PATH)
     c = con.cursor()
@@ -180,7 +173,7 @@ def last_txs(user_id: int, limit: int = 10):
     con.close()
     return rows
 
-# === ХЭНДЛЕРЫ ===
+# ==== ХЭНДЛЕРЫ ====
 async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Razzakov’s Finance 🤖\n"
@@ -189,18 +182,15 @@ async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
         reply_markup=MAIN_KB
     )
 
-async def ai_button(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Напиши вопрос — отвечу советом/подсказкой.", reply_markup=MAIN_KB)
-
 async def balance_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     bal_uzs, bal_usd = get_balance(uid)
-    msg = (
+    await update.message.reply_text(
         f"Баланс:\n"
         f"• UZS: {int(bal_uzs):,}".replace(",", " ") + "\n"
-        f"• USD: {bal_usd:.2f}"
+        f"• USD: {bal_usd:.2f}",
+        reply_markup=MAIN_KB
     )
-    await update.message.reply_text(msg, reply_markup=MAIN_KB)
 
 async def history_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -218,32 +208,30 @@ async def report_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     now = datetime.now()
     inc_uzs, exp_uzs, inc_usd, exp_usd = month_report(uid, now.year, now.month)
-    bal_uzs = inc_uzs - exp_узs
+    bal_uzs = inc_uzs - exp_uzs
     bal_usd = inc_usd - exp_usd
-    msg = (
+    await update.message.reply_text(
         f"Отчёт за {now.strftime('%B %Y')}:\n"
         f"• Доход UZS: {int(inc_uzs):,}".replace(",", " ") + "\n"
         f"• Расход UZS: {int(exp_uzs):,}".replace(",", " ") + "\n"
         f"• Баланс UZS: {int(bal_uzs):,}".replace(",", " ") + "\n"
-        f"• Баланс USD: {bal_usd:.2f}"
+        f"• Баланс USD: {bal_usd:.2f}",
+        reply_markup=MAIN_KB
     )
-    await update.message.reply_text(msg, reply_markup=MAIN_KB)
 
 async def text_router(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = (update.message.text or "").strip()
-
     low = text.lower()
+
     if "баланс" in low:
         await balance_handler(update, _); return
     if "история" in low:
         await history_handler(update, _); return
     if "отчёт" in low or "отчет" in low:
         await report_handler(update, _); return
-    if "ai" in low or "🤖" in low:
-        await ai_button(update, _); return
 
-    # Пробуем распарсить как финансовую транзакцию
+    # Пытаемся распарсить как транзакцию
     ttype, amount, currency, category = ai_classify_finance(text)
     if amount is not None:
         add_tx(uid, ttype, amount, currency, category, text)
@@ -254,14 +242,13 @@ async def text_router(update: Update, _: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Иначе — короткий AI-совет
-    reply = ai_chat_reply(text)
-    await update.message.reply_text(reply, reply_markup=MAIN_KB)
+    # Короткий офлайн-совет
+    await update.message.reply_text(ai_chat_reply(text), reply_markup=MAIN_KB)
 
 async def unknown_cmd(update: Update, _: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Нажми кнопку ниже или напиши траты/доход.", reply_markup=MAIN_KB)
 
-# === ЗАПУСК ЧЕРЕЗ WEBHOOK ===
+# ==== ЗАПУСК ЧЕРЕЗ WEBHOOK ====
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -273,7 +260,7 @@ def main():
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
+        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",  # PTB сам выставит setWebhook
         drop_pending_updates=True
     )
 
