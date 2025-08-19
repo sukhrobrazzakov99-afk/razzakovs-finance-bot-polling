@@ -13,7 +13,7 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # ==== ЗАПОЛНЕНО: токен и вебхук ====
-BOT_TOKEN  = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
+BOT_TOKEN   = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
 WEBHOOK_URL = "https://beautiful-love.up.railway.app"   # адрес твоего Railway
 PORT = int(os.environ.get("PORT", "8080"))
 
@@ -58,7 +58,7 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ==== ЭВРИСТИКИ ("AI" без внешнего API) ====
+# ==== ЭВРИСТИКИ ====
 CURRENCY_SIGNS = {
     "usd": ["$", "usd", "дол", "доллар"],
     "uzs": ["сум", "sum", "uzs", "сумы", "сумов"]
@@ -83,15 +83,12 @@ def detect_currency(text: str) -> str:
     return "uzs"
 
 def parse_amount(text: str) -> Optional[float]:
-    # 120000 / 120 000 / 120,000 / 12.5 / 12,5
     m = re.findall(r"(?:(?<=\s)|^)(\d{1,3}(?:[ \u00A0,\.]\d{3})+|\d+)(?:[.,](\d{1,2}))?", text)
     if not m:
         return None
     raw, frac = m[-1]
     num = re.sub(r"[ \u00A0,\.]", "", raw)
-    if frac:
-        return float(f"{num}.{frac}")
-    return float(num)
+    return float(f"{num}.{frac}") if frac else float(num)
 
 def guess_type(text: str) -> str:
     t = text.lower()
@@ -160,35 +157,17 @@ def month_report(user_id: int, y: int, m: int):
                   (user_id, ttype, cur, start, end))
         return c.fetchone()[0]
     inc_uzs = sum_where("income", "uzs"); exp_uzs = sum_where("expense", "uzs")
-    inc_usd = sum_where("income", "usd"); exp_usd = sum_where("expense", "usd")
+    inc_usd = sum_where("income", "usd");  exp_usd = sum_where("expense", "usd")
     con.close()
-    return inc_uzs, exp_uzs, inc_usd, exp_usd
-
-def last_txs(user_id: int, limit: int = 10):
-    con = sqlite3.connect(DB_PATH)
-    c = con.cursor()
-    c.execute("""SELECT ttype, amount, currency, category, note, ts
-                 FROM tx WHERE user_id=? ORDER BY id DESC LIMIT ?""", (user_id, limit))
-    rows = c.fetchall()
-    con.close()
-    return rows
+    return inc_uzs, exp_узs, inc_usd, exp_usd  # noqa
 
 # ==== ХЭНДЛЕРЫ ====
 async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    log.info("Update from %s: /start", update.effective_user.id)
     await update.message.reply_text(
         "Razzakov’s Finance 🤖\n"
         "Пиши: «самса 18 000 сум», «такси 25 000», «зарплата 800$» — разберу и сохраню.\n"
         "Кнопки снизу — быстрые функции.",
-        reply_markup=MAIN_KB
-    )
-
-async def balance_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    bal_uzs, bal_usd = get_balance(uid)
-    await update.message.reply_text(
-        f"Баланс:\n"
-        f"• UZS: {int(bal_uzs):,}".replace(",", " ") + "\n"
-        f"• USD: {bal_usd:.2f}",
         reply_markup=MAIN_KB
     )
 
@@ -204,11 +183,30 @@ async def history_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{dt} {sign} {amount:.2f} {cur.upper()} • {cat} • {note or '-'}")
     await update.message.reply_text("Последние операции:\n" + "\n".join(lines), reply_markup=MAIN_KB)
 
+def last_txs(user_id: int, limit: int = 10):
+    con = sqlite3.connect(DB_PATH)
+    c = con.cursor()
+    c.execute("""SELECT ttype, amount, currency, category, note, ts
+                 FROM tx WHERE user_id=? ORDER BY id DESC LIMIT ?""", (user_id, limit))
+    rows = c.fetchall()
+    con.close()
+    return rows
+
+async def balance_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    bal_uzs, bal_usd = get_balance(uid)
+    await update.message.reply_text(
+        f"Баланс:\n"
+        f"• UZS: {int(bal_uzs):,}".replace(",", " ") + "\n"
+        f"• USD: {bal_usd:.2f}",
+        reply_markup=MAIN_KB
+    )
+
 async def report_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     now = datetime.now()
     inc_uzs, exp_uzs, inc_usd, exp_usd = month_report(uid, now.year, now.month)
-    bal_uzs = inc_uzs - exp_uzs
+    bal_uzs = inc_узs - exp_uzs
     bal_usd = inc_usd - exp_usd
     await update.message.reply_text(
         f"Отчёт за {now.strftime('%B %Y')}:\n"
@@ -222,8 +220,9 @@ async def report_handler(update: Update, _: ContextTypes.DEFAULT_TYPE):
 async def text_router(update: Update, _: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = (update.message.text or "").strip()
-    low = text.lower()
+    log.info("Incoming from %s: %s", uid, text)
 
+    low = text.lower()
     if "баланс" in low:
         await balance_handler(update, _); return
     if "история" in low:
@@ -231,7 +230,6 @@ async def text_router(update: Update, _: ContextTypes.DEFAULT_TYPE):
     if "отчёт" in low or "отчет" in low:
         await report_handler(update, _); return
 
-    # Пытаемся распарсить как транзакцию
     ttype, amount, currency, category = ai_classify_finance(text)
     if amount is not None:
         add_tx(uid, ttype, amount, currency, category, text)
@@ -242,11 +240,10 @@ async def text_router(update: Update, _: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Короткий офлайн-совет
     await update.message.reply_text(ai_chat_reply(text), reply_markup=MAIN_KB)
 
 async def unknown_cmd(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Нажми кнопку ниже или напиши траты/доход.", reply_markup=MAIN_KB)
+    await update.message.reply_text("Нажми кнопку или напиши траты/доход.", reply_markup=MAIN_KB)
 
 # ==== ЗАПУСК ЧЕРЕЗ WEBHOOK ====
 def main():
@@ -260,7 +257,8 @@ def main():
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",  # PTB сам выставит setWebhook
+        url_path=BOT_TOKEN,                      # <— ВАЖНО: сервер слушает /<TOKEN>
+        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",# <— Телеграм шлёт сюда
         drop_pending_updates=True
     )
 
