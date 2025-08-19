@@ -4,6 +4,7 @@
 # python-telegram-bot==21.4
 # pydantic==2.8.2
 
+import os
 import re
 import sqlite3
 import time
@@ -18,16 +19,30 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters
 )
 
-# === ЗАПОЛНЕНО: токен и адрес вебхука ===
-TOKEN = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
-WEBHOOK_URL = "https://secure-consideration-production.up.railway.app"
-PORT = 8080
+# === Конфигурация через переменные окружения (без хардкода секретов) ===
+# Обязательно задайте BOT_TOKEN и WEBHOOK_URL в окружении деплоя
+TOKEN = os.environ.get("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is required")
+
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+PORT = int(os.environ.get("PORT", "8080"))
+
+# Секрет для валидации вебхука Telegram (не включаем токен бота в URL)
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", TOKEN)
 
 DB_PATH = "finance.db"
 
 # ==== ИНИЦИАЛИЗАЦИЯ БД ====
+def _connect_db():
+    # Увеличенный таймаут + WAL для снижения блокировок под нагрузкой
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    con.execute("PRAGMA journal_mode=WAL;")
+    con.execute("PRAGMA synchronous=NORMAL;")
+    return con
+
 def init_db():
-    con = sqlite3.connect(DB_PATH)
+    con = _connect_db()
     c = con.cursor()
     c.execute(
         """
@@ -133,7 +148,7 @@ def ai_classify(text: str) -> Tuple[str, Optional[float], str, str]:
 
 # ==== РАБОТА С БД ====
 def add_tx(user_id: int, ttype: str, amount: float, currency: str, category: str, note: str):
-    con = sqlite3.connect(DB_PATH)
+    con = _connect_db()
     c = con.cursor()
     c.execute(
         "INSERT INTO tx (user_id, ttype, amount, currency, category, note, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -143,7 +158,7 @@ def add_tx(user_id: int, ttype: str, amount: float, currency: str, category: str
     con.close()
 
 def get_balance(user_id: int) -> Tuple[float, float]:
-    con = sqlite3.connect(DB_PATH)
+    con = _connect_db()
     c = con.cursor()
     c.execute("SELECT COALESCE(SUM(amount),0) FROM tx WHERE user_id=? AND ttype='income' AND currency='uzs'", (user_id,))
     inc_uzs = c.fetchone()[0]
@@ -168,7 +183,7 @@ def month_report(user_id: int, y: int, m: int) -> Tuple[float, float, float, flo
     else:
         end = int(datetime(y, m + 1, 1).timestamp())
 
-    con = sqlite3.connect(DB_PATH)
+    con = _connect_db()
     c = con.cursor()
     def sum_where(ttype, cur):
         c.execute(
@@ -185,7 +200,7 @@ def month_report(user_id: int, y: int, m: int) -> Tuple[float, float, float, flo
     return inc_uzs - exp_uzs, inc_usd - exp_usd, inc_uzs, exp_uzs
 
 def last_txs(user_id: int, limit: int = 10):
-    con = sqlite3.connect(DB_PATH)
+    con = _connect_db()
     c = con.cursor()
     c.execute(
         "SELECT ttype, amount, currency, category, note, ts FROM tx WHERE user_id=? ORDER BY id DESC LIMIT ?",
@@ -305,7 +320,9 @@ def main():
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
+        url_path="webhook",
+        webhook_url=f"{WEBHOOK_URL}/webhook" if WEBHOOK_URL else None,
+        secret_token=WEBHOOK_SECRET,
         drop_pending_updates=True
     )
 
