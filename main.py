@@ -1,10 +1,10 @@
-# main.py — PTB 21.4 [webhooks], офлайн "AI" (эвристики), SQLite.
-# Никаких asyncio.run/post_init. Вебхук ставит сам run_webhook.
+# main.py — PTB 21.4 [webhooks], офлайн "AI", SQLite.
+# Webhook ИЛИ Polling (по переменной окружения USE_POLLING).
 # requirements.txt: python-telegram-bot[webhooks]==21.4
 
 import os, re, sqlite3, time, logging
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -12,32 +12,26 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 BOT_TOKEN   = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
 WEBHOOK_URL = "https://beautiful-love.up.railway.app"
 
-# Railway всегда задаёт PORT — слушаем именно его
 PORT = int(os.environ.get("PORT", "8080"))
+USE_POLLING = os.environ.get("USE_POLLING", "0") == "1"
 
 DB_PATH = "finance.db"
 
-# ==== ЛОГИ ====
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s | %(message)s", level=logging.INFO)
 log = logging.getLogger("razzakovs-ai-bot")
 
-# ==== БД ====
 def init_db():
     con = sqlite3.connect(DB_PATH); c = con.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS tx(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         ttype TEXT NOT NULL CHECK(ttype IN('income','expense')),
-        amount REAL NOT NULL,
-        currency TEXT NOT NULL,
-        category TEXT NOT NULL,
-        note TEXT,
-        ts INTEGER NOT NULL)""")
+        amount REAL NOT NULL, currency TEXT NOT NULL, category TEXT NOT NULL,
+        note TEXT, ts INTEGER NOT NULL)""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_user_ts ON tx(user_id, ts)")
     con.commit(); con.close()
 init_db()
 
-# ==== Клавиатура ====
 MAIN_KB = ReplyKeyboardMarkup(
     [[KeyboardButton("➕ Доход"), KeyboardButton("➖ Расход")],
      [KeyboardButton("💰 Баланс"), KeyboardButton("📜 История")],
@@ -45,7 +39,6 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ==== Эвристики ("AI" без внешних API) ====
 CURRENCY_SIGNS = {"usd": ["$", "usd", "дол", "доллар"], "uzs": ["сум", "sum", "uzs", "сумы", "сумов"]}
 CATEGORY_KEYWORDS = {
     "Еда":["еда","продукт","обед","ужин","завтрак","кафе","ресторан","самса","плов","шаурма","пицца"],
@@ -82,7 +75,6 @@ def guess_category(t:str)->str:
 def ai_classify_finance(t:str):
     return guess_type(t), parse_amount(t), detect_currency(t), guess_category(t)
 
-# ==== БД-утилиты ====
 def add_tx(uid:int, ttype:str, amount:float, cur:str, cat:str, note:str):
     con=sqlite3.connect(DB_PATH); c=con.cursor()
     c.execute("INSERT INTO tx(user_id,ttype,amount,currency,category,note,ts) VALUES(?,?,?,?,?,?,?)",
@@ -98,12 +90,10 @@ def get_balance(uid:int):
     def s(t,cur):
         c.execute("SELECT COALESCE(SUM(amount),0) FROM tx WHERE user_id=? AND ttype=? AND currency=?",(uid,t,cur))
         return c.fetchone()[0]
-    bal_uzs = s("income","uzs") - s("expense","uzs")
-    bal_usd = s("income","usd") - s("expense","usd")
-    con.close()
-    return bal_uzs, bal_usd
+    bal_uzs=s("income","uzs")-s("expense","uzs")
+    bal_usd=s("income","usd")-s("expense","usd"); con.close()
+    return bal_узs, bal_usd  # noqa
 
-# ==== Хэндлеры ====
 async def start(update:Update, _:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Razzakov’s Finance 🤖\nПиши: «самса 18 000 сум», «такси 25 000», «зарплата 800$».",
@@ -150,22 +140,25 @@ async def text_router(update:Update, _:ContextTypes.DEFAULT_TYPE):
 async def unknown_cmd(update:Update, _:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Нажми кнопку или напиши траты/доход.", reply_markup=MAIN_KB)
 
-# ==== Запуск: run_webhook сам ставит вебхук и держит event loop ====
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
-    # Слушаем именно $PORT и путь /<TOKEN>, а Telegram шлёт на WEBHOOK_URL/<TOKEN>
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=BOT_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
-        drop_pending_updates=True
-    )
+    if USE_POLLING:
+        # ✅ Режим POLLING: для проверки работы бота без вебхука
+        app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    else:
+        # ✅ Режим WEBHOOK: как у тебя на Railway
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=BOT_TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
+            drop_pending_updates=True
+        )
 
 if __name__ == "__main__":
     main()
+
