@@ -13,6 +13,9 @@ TIMEZONE = ZoneInfo(os.environ.get("TZ", "Asia/Tashkent"))
 ALLOWED_USER_IDS = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(";", ",").split(",") if x.strip().isdigit()}
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID")) if os.environ.get("ADMIN_USER_ID", "").isdigit() else None
 
+# Новый токен (можно переопределить через BOT_TOKEN в переменных окружения)
+DEFAULT_BOT_TOKEN = "7611168200:AAH_NPSecM5hrqPKindVLiQy4zkPIauqmTc"
+
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s | %(message)s", level=logging.INFO)
 log = logging.getLogger("bot")
 
@@ -826,9 +829,7 @@ async def unknown_cmd(update: Update, _: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Нажми кнопку или напиши траты/доход.", reply_markup=MAIN_KB)
 
 def main():
-    token = os.environ.get("BOT_TOKEN")
-    if not token:
-        raise RuntimeError("BOT_TOKEN is not set in environment variables")
+    token = os.environ.get("BOT_TOKEN", DEFAULT_BOT_TOKEN)
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
