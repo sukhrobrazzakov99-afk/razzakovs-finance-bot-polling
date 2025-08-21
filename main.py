@@ -1,4 +1,5 @@
-# main.py — PTB 21.4 [webhooks], офлайн "AI", SQLite, корректная установка webhook через post_init
+# main.py — PTB 21.4 [webhooks], офлайн "AI" (эвристики), SQLite.
+# Никаких asyncio.run/post_init. Вебхук ставит сам run_webhook.
 # requirements.txt: python-telegram-bot[webhooks]==21.4
 
 import os, re, sqlite3, time, logging
@@ -11,7 +12,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 BOT_TOKEN   = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
 WEBHOOK_URL = "https://beautiful-love.up.railway.app"
 
-# Railway задаёт PORT сам — слушаем именно его
+# Railway всегда задаёт PORT — слушаем именно его
 PORT = int(os.environ.get("PORT", "8080"))
 
 DB_PATH = "finance.db"
@@ -27,8 +28,11 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         ttype TEXT NOT NULL CHECK(ttype IN('income','expense')),
-        amount REAL NOT NULL, currency TEXT NOT NULL, category TEXT NOT NULL,
-        note TEXT, ts INTEGER NOT NULL)""")
+        amount REAL NOT NULL,
+        currency TEXT NOT NULL,
+        category TEXT NOT NULL,
+        note TEXT,
+        ts INTEGER NOT NULL)""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_user_ts ON tx(user_id, ts)")
     con.commit(); con.close()
 init_db()
@@ -94,9 +98,10 @@ def get_balance(uid:int):
     def s(t,cur):
         c.execute("SELECT COALESCE(SUM(amount),0) FROM tx WHERE user_id=? AND ttype=? AND currency=?",(uid,t,cur))
         return c.fetchone()[0]
-    bal_uzs=s("income","uzs")-s("expense","uzs")
-    bal_usd=s("income","usd")-s("expense","usd"); con.close()
-    return bal_узs, bal_usd  # noqa: F821 (узs → латиницей ниже используем правильно)
+    bal_uzs = s("income","uzs") - s("expense","uzs")
+    bal_usd = s("income","usd") - s("expense","usd")
+    con.close()
+    return bal_uzs, bal_usd
 
 # ==== Хэндлеры ====
 async def start(update:Update, _:ContextTypes.DEFAULT_TYPE):
@@ -145,26 +150,15 @@ async def text_router(update:Update, _:ContextTypes.DEFAULT_TYPE):
 async def unknown_cmd(update:Update, _:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Нажми кнопку или напиши траты/доход.", reply_markup=MAIN_KB)
 
-# ==== Правильная установка вебхука через post_init (без asyncio.run) ====
-async def _post_init(app: Application):
-    # Сначала чистим старый, затем ставим новый webhook
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    await app.bot.set_webhook(f"{WEBHOOK_URL}/{BOT_TOKEN}")
-
+# ==== Запуск: run_webhook сам ставит вебхук и держит event loop ====
 def main():
-    app = (
-        Application
-        .builder()
-        .token(BOT_TOKEN)
-        .post_init(_post_init)   # <-- PTB вызовет это внутри своего event loop
-        .build()
-    )
+    app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
-    # Слушаем именно $PORT и путь /<TOKEN>
+    # Слушаем именно $PORT и путь /<TOKEN>, а Telegram шлёт на WEBHOOK_URL/<TOKEN>
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
@@ -175,4 +169,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
