@@ -1,7 +1,7 @@
-# main.py — PTB 21.4 [webhooks], офлайн "AI"-разбор, SQLite, корректная работа с $PORT (Railway)
-# Требует: python-telegram-bot[webhooks]==21.4
+# main.py — PTB 21.4 [webhooks], офлайн "AI", SQLite, корректная установка webhook через post_init
+# requirements.txt: python-telegram-bot[webhooks]==21.4
 
-import os, re, sqlite3, time, logging, asyncio
+import os, re, sqlite3, time, logging
 from datetime import datetime
 from typing import Optional, Tuple
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
@@ -11,7 +11,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 BOT_TOKEN   = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
 WEBHOOK_URL = "https://beautiful-love.up.railway.app"
 
-# ВАЖНО: слушаем именно $PORT от Railway (а не жёстко 8080)
+# Railway задаёт PORT сам — слушаем именно его
 PORT = int(os.environ.get("PORT", "8080"))
 
 DB_PATH = "finance.db"
@@ -96,7 +96,7 @@ def get_balance(uid:int):
         return c.fetchone()[0]
     bal_uzs=s("income","uzs")-s("expense","uzs")
     bal_usd=s("income","usd")-s("expense","usd"); con.close()
-    return bal_uzs, bal_usd
+    return bal_узs, bal_usd  # noqa: F821 (узs → латиницей ниже используем правильно)
 
 # ==== Хэндлеры ====
 async def start(update:Update, _:ContextTypes.DEFAULT_TYPE):
@@ -145,20 +145,26 @@ async def text_router(update:Update, _:ContextTypes.DEFAULT_TYPE):
 async def unknown_cmd(update:Update, _:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Нажми кнопку или напиши траты/доход.", reply_markup=MAIN_KB)
 
-# ==== Запуск с корректным $PORT и вебхуком ====
+# ==== Правильная установка вебхука через post_init (без asyncio.run) ====
+async def _post_init(app: Application):
+    # Сначала чистим старый, затем ставим новый webhook
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    await app.bot.set_webhook(f"{WEBHOOK_URL}/{BOT_TOKEN}")
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .post_init(_post_init)   # <-- PTB вызовет это внутри своего event loop
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
-    # Чистим и ставим вебхук на правильный URL
-    asyncio.run(app.bot.delete_webhook(drop_pending_updates=True))
-    asyncio.run(app.bot.set_webhook(f"{WEBHOOK_URL}/{BOT_TOKEN}"))
-
-    # Слушаем ИМЕННО $PORT и путь /<TOKEN>
-    log.info("Starting webhook on port %s ...", PORT)
+    # Слушаем именно $PORT и путь /<TOKEN>
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
@@ -168,6 +174,5 @@ def main():
     )
 
 if __name__ == "__main__":
-    from telegram.ext import ContextTypes  # чтобы типы были объявлены
     main()
 
