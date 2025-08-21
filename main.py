@@ -1,5 +1,5 @@
-# main.py — PTB 21.4 [webhooks], офлайн "AI"-разбор, SQLite, корректный setWebhook.
-# requirements.txt:  python-telegram-bot[webhooks]==21.4
+# main.py — PTB 21.4 [webhooks], офлайн "AI"-разбор, SQLite, корректная работа с $PORT (Railway)
+# Требует: python-telegram-bot[webhooks]==21.4
 
 import os, re, sqlite3, time, logging, asyncio
 from datetime import datetime
@@ -7,33 +7,33 @@ from typing import Optional, Tuple
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# === ЗАПОЛНЕНО: твои данные ===
+# ==== ЗАПОЛНЕНО ====
 BOT_TOKEN   = "7611168200:AAHj7B6FelvvcoJMDBuKwKpveBHEo0NItnI"
-WEBHOOK_URL = "https://beautiful-love.up.railway.app"   # твой Railway-домен
+WEBHOOK_URL = "https://beautiful-love.up.railway.app"
+
+# ВАЖНО: слушаем именно $PORT от Railway (а не жёстко 8080)
 PORT = int(os.environ.get("PORT", "8080"))
 
 DB_PATH = "finance.db"
 
-# === Логи ===
+# ==== ЛОГИ ====
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s | %(message)s", level=logging.INFO)
 log = logging.getLogger("razzakovs-ai-bot")
 
-# === БД ===
+# ==== БД ====
 def init_db():
     con = sqlite3.connect(DB_PATH); c = con.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS tx(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         ttype TEXT NOT NULL CHECK(ttype IN('income','expense')),
-        amount REAL NOT NULL,
-        currency TEXT NOT NULL,
-        category TEXT NOT NULL,
+        amount REAL NOT NULL, currency TEXT NOT NULL, category TEXT NOT NULL,
         note TEXT, ts INTEGER NOT NULL)""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_user_ts ON tx(user_id, ts)")
     con.commit(); con.close()
 init_db()
 
-# === Клавиатура ===
+# ==== Клавиатура ====
 MAIN_KB = ReplyKeyboardMarkup(
     [[KeyboardButton("➕ Доход"), KeyboardButton("➖ Расход")],
      [KeyboardButton("💰 Баланс"), KeyboardButton("📜 История")],
@@ -41,18 +41,18 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# === Эвристики ("AI" без внешних API) ===
+# ==== Эвристики ("AI" без внешних API) ====
 CURRENCY_SIGNS = {"usd": ["$", "usd", "дол", "доллар"], "uzs": ["сум", "sum", "uzs", "сумы", "сумов"]}
 CATEGORY_KEYWORDS = {
-    "Еда": ["еда","продукт","обед","ужин","завтрак","кафе","ресторан","самса","плов","шаурма","пицца"],
-    "Транспорт": ["такси","топливо","бензин","газ","метро","автобус","аренда авто","аренда машины"],
-    "Зарплата": ["зарплата","оклад","премия","бонус","аванс"],
-    "Здоровье": ["аптека","врач","стоматолог","лекар","витамин"],
-    "Развлечения": ["кино","игра","cs2","steam","подписка","spotify","netflix"],
-    "Дом": ["аренда","квартира","коммунал","электр","интернет","ремонт"],
-    "Детское": ["памперс","подгуз","коляска","игруш","детск","дочка","хадиджа"],
-    "Спорт": ["зал","спорт","креатин","протеин","гейнер","абонемент"],
-    "Прочее": []
+    "Еда":["еда","продукт","обед","ужин","завтрак","кафе","ресторан","самса","плов","шаурма","пицца"],
+    "Транспорт":["такси","топливо","бензин","газ","метро","автобус","аренда авто","аренда машины"],
+    "Зарплата":["зарплата","оклад","премия","бонус","аванс"],
+    "Здоровье":["аптека","врач","стоматолог","лекар","витамин"],
+    "Развлечения":["кино","игра","cs2","steam","подписка","spotify","netflix"],
+    "Дом":["аренда","квартира","коммунал","электр","интернет","ремонт"],
+    "Детское":["памперс","подгуз","коляска","игруш","детск","дочка","хадиджа"],
+    "Спорт":["зал","спорт","креатин","протеин","гейнер","абонемент"],
+    "Прочее":[]
 }
 def detect_currency(t:str)->str:
     t=t.lower()
@@ -78,7 +78,7 @@ def guess_category(t:str)->str:
 def ai_classify_finance(t:str):
     return guess_type(t), parse_amount(t), detect_currency(t), guess_category(t)
 
-# === БД-утилиты ===
+# ==== БД-утилиты ====
 def add_tx(uid:int, ttype:str, amount:float, cur:str, cat:str, note:str):
     con=sqlite3.connect(DB_PATH); c=con.cursor()
     c.execute("INSERT INTO tx(user_id,ttype,amount,currency,category,note,ts) VALUES(?,?,?,?,?,?,?)",
@@ -98,7 +98,7 @@ def get_balance(uid:int):
     bal_usd=s("income","usd")-s("expense","usd"); con.close()
     return bal_uzs, bal_usd
 
-# === Хэндлеры ===
+# ==== Хэндлеры ====
 async def start(update:Update, _:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Razzakov’s Finance 🤖\nПиши: «самса 18 000 сум», «такси 25 000», «зарплата 800$».",
@@ -140,12 +140,12 @@ async def text_router(update:Update, _:ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_KB
         ); return
 
-    await update.message.reply_text("Принято ✅ Напиши, напр.: «такси 25 000», «зарплата 800$».", reply_markup=MAIN_KB)
+    await update.message.reply_text("Принято ✅ Напиши: «такси 25 000», «зарплата 800$».", reply_markup=MAIN_KB)
 
 async def unknown_cmd(update:Update, _:ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Нажми кнопку или напиши траты/доход.", reply_markup=MAIN_KB)
 
-# === Запуск с корректным setWebhook ===
+# ==== Запуск с корректным $PORT и вебхуком ====
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -153,19 +153,21 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
-    # Сначала гарантированно сбрасываем старый и ставим новый вебхук:
+    # Чистим и ставим вебхук на правильный URL
     asyncio.run(app.bot.delete_webhook(drop_pending_updates=True))
     asyncio.run(app.bot.set_webhook(f"{WEBHOOK_URL}/{BOT_TOKEN}"))
 
-    # Запускаем сервер и слушаем ровно тот путь, на который шлёт Telegram:
+    # Слушаем ИМЕННО $PORT и путь /<TOKEN>
+    log.info("Starting webhook on port %s ...", PORT)
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=BOT_TOKEN,                          # сервер слушает /<TOKEN>
-        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",    # Telegram шлёт сюда
+        url_path=BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
         drop_pending_updates=True
     )
 
 if __name__ == "__main__":
+    from telegram.ext import ContextTypes  # чтобы типы были объявлены
     main()
 
