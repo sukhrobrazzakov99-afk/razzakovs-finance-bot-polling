@@ -13,8 +13,7 @@ TIMEZONE = ZoneInfo(os.environ.get("TZ", "Asia/Tashkent"))
 ALLOWED_USER_IDS = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(";", ",").split(",") if x.strip().isdigit()}
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID")) if os.environ.get("ADMIN_USER_ID", "").isdigit() else None
 
-# Можно переопределить через BOT_TOKEN в переменных окружения
-DEFAULT_BOT_TOKEN = "7611168200:AAH_NPSecM5hrqPKindVLiQy4zkPIauqmTc"
+DEFAULT_BOT_TOKEN = os.environ.get("BOT_TOKEN", "7611168200:AAH_NPSecM5hrqPKindVLiQy4zkPIauqmTc")
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s | %(message)s", level=logging.INFO)
 log = logging.getLogger("bot")
@@ -70,6 +69,20 @@ def init_db():
 		username TEXT,
 		last_seen_ts INTEGER NOT NULL
 	)""")
+	# Debts
+	c.execute("""CREATE TABLE IF NOT EXISTS debts(
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		direction TEXT NOT NULL CHECK(direction IN('i_owe','they_owe')),
+		counterparty TEXT NOT NULL,
+		amount REAL NOT NULL,
+		currency TEXT NOT NULL,
+		note TEXT,
+		status TEXT NOT NULL DEFAULT 'open' CHECK(status IN('open','closed')),
+		created_ts INTEGER NOT NULL,
+		updated_ts INTEGER NOT NULL
+	)""")
+	c.execute("CREATE INDEX IF NOT EXISTS idx_debts_user ON debts(user_id, status, direction)")
 	con.commit(); con.close()
 init_db()
 
@@ -82,6 +95,7 @@ MAIN_KB = ReplyKeyboardMarkup(
 		[KeyboardButton("📊 Отчёт (месяц)"), KeyboardButton("Экспорт 📂")],
 		[KeyboardButton("↩️ Отменить"), KeyboardButton("✏️ Редактировать")],
 		[KeyboardButton("Бюджет 💡"), KeyboardButton("Курс валют 💱")],
+		[KeyboardButton("Долги")],
 		[KeyboardButton("🔁 Повторы"), KeyboardButton("📈 Аналитика")],
 		[KeyboardButton("📅 Автодаты"), KeyboardButton("🔔 Напоминания")],
 		[KeyboardButton("PDF отчёт"), KeyboardButton("👥 Пользователи")],
@@ -89,8 +103,17 @@ MAIN_KB = ReplyKeyboardMarkup(
 	resize_keyboard=True
 )
 
+def debts_menu_kb() -> ReplyKeyboardMarkup:
+	rows = [
+		[KeyboardButton("➕ Я должен"), KeyboardButton("➕ Мне должны")],
+		[KeyboardButton("📜 Я должен"), KeyboardButton("📜 Мне должны")],
+		[KeyboardButton("✖️ Закрыть долг"), KeyboardButton("➖ Уменьшить долг")],
+		[KeyboardButton(BACK_BTN)]
+	]
+	return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
 EXPENSE_CATEGORIES = ["Еда","Транспорт","Здоровье","Развлечения","Дом","Детское","Спорт","Прочее"]
-INCOME_CATEGORIES = ["Зарплата","Подработка","Подарок","Премия","Инвестиции","Прочее"]
+INCOME_CATEGORIES  = ["Зарплата","Подработка","Подарок","Премия","Инвестиции","Прочее"]
 
 CATEGORY_KEYWORDS = {
 	"Еда": ["еда","продукт","обед","ужин","завтрак","кафе","ресторан","самса","плов","шаурма","пицца"],
@@ -203,6 +226,65 @@ def get_balance(uid: int) -> Tuple[float,float]:
 	con.close()
 	return bal_uzs, bal_usd
 
+# Debts helpers
+def add_debt(uid: int, direction: str, counterparty: str, amount: float, currency: str, note: str) -> int:
+	now = int(time.time())
+	con = sqlite3.connect(DB_PATH); c = con.cursor()
+	c.execute("""INSERT INTO debts(user_id, direction, counterparty, amount, currency, note, status, created_ts, updated_ts)
+	             VALUES(?,?,?,?,?,?, 'open', ?, ?)""",
+	          (uid, direction, counterparty, amount, currency, note, now, now))
+	debt_id = c.lastrowid
+	con.commit(); con.close()
+	return debt_id
+
+def list_debts(uid: int, direction: str):
+	con = sqlite3.connect(DB_PATH); c = con.cursor()
+	c.execute("""SELECT id, counterparty, amount, currency, note
+	             FROM debts
+	             WHERE user_id=? AND status='open' AND direction=?
+	             ORDER BY id DESC""", (uid, direction))
+	rows = c.fetchall(); con.close(); return rows
+
+def close_debt(uid: int, debt_id: int) -> bool:
+	now = int(time.time())
+	con = sqlite3.connect(DB_PATH); c = con.cursor()
+	c.execute("UPDATE debts SET status='closed', updated_ts=? WHERE id=? AND user_id=? AND status='open'", (now, debt_id, uid))
+	ok = c.rowcount > 0
+	con.commit(); con.close()
+	return ok
+
+def reduce_debt(uid: int, debt_id: int, delta: float) -> Optional[Tuple[float,str,str]]:
+	# returns (new_amount, currency, status)
+	now = int(time.time())
+	con = sqlite3.connect(DB_PATH); c = con.cursor()
+	c.execute("SELECT amount, currency FROM debts WHERE id=? AND user_id=? AND status='open'", (debt_id, uid))
+	row = c.fetchone()
+	if not row:
+		con.close(); return None
+	amount, currency = row
+	new_amount = max(0.0, amount - abs(delta))
+	if new_amount <= 0.0:
+		c.execute("UPDATE debts SET amount=0, status='closed', updated_ts=? WHERE id=?", (now, debt_id))
+		status = "closed"
+	else:
+		c.execute("UPDATE debts SET amount=?, updated_ts=? WHERE id=?", (new_amount, now, debt_id))
+		status = "open"
+	con.commit(); con.close()
+	return new_amount, currency, status
+
+def debt_totals(uid: int) -> Tuple[float,float,float,float]:
+	# returns (iowe_uzs, iowe_usd, theyowe_uzs, theyowe_usd)
+	con = sqlite3.connect(DB_PATH); c = con.cursor()
+	def s(direction: str, cur: str):
+		c.execute("""SELECT COALESCE(SUM(amount),0)
+		             FROM debts WHERE user_id=? AND status='open' AND direction=? AND currency=?""",
+		          (uid, direction, cur))
+		return c.fetchone()[0] or 0.0
+	iowe_uzs = s("i_owe","uzs"); iowe_usd = s("i_owe","usd")
+	they_uzs = s("they_owe","uzs"); they_usd = s("they_owe","usd")
+	con.close()
+	return iowe_uzs, iowe_usd, they_uzs, they_usd
+
 def month_bounds_now():
 	now = datetime.now(TIMEZONE)
 	start = datetime(now.year, now.month, 1, 0, 0, 0, tzinfo=TIMEZONE)
@@ -253,8 +335,8 @@ async def month_report_text(uid: int) -> str:
 	lines = [
 		"Отчёт (месяц):",
 		f"• Доход UZS: {fmt_amount(inc_uzs,'uzs')} | USD: {fmt_amount(inc_usd,'usd')}",
-		f"• Расход UZS: {fmt_amount(exp_uzs,'uzs')} | USD: {fmt_amount(exp_usd,'usd')}",
-		f"• Баланс UZS: {fmt_amount(bal_uzs,'uzs')} | USD: {fmt_amount(bal_usd,'usd')}",
+		f"• Расход UZS: {fmt_amount(exp_узs,'uzs')} | USD: {fmt_amount(exp_usd,'usd')}",
+		f"• Баланс UZS: {fmt_amount(bal_узs,'uzs')} | USD: {fmt_amount(bal_usd,'usd')}",
 	]
 	if top:
 		lines.append("Топ расходов:")
@@ -423,12 +505,12 @@ async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
 		return
 	upsert_seen_user(update.effective_user.id, update.effective_user.first_name or "", update.effective_user.username)
 	await update.message.reply_text(
-		"Razzakov’s Finance 🤖\nПиши: «самса 18 000 сум» или используй кнопки «➖ Расход / ➕ Доход».",
+		"Razzakov’s Finance 🤖\nПиши: «самса 18 000 сум» или используй кнопки «➖ Расход / ➕ Доход / Долги».",
 		reply_markup=MAIN_KB
 	)
 
 def tx_line(ttype: str, amount: float, cur: str, cat: str, note: Optional[str], ts: int) -> str:
-	dt = datetime.fromtimestamp(ts, tz=TIMEZONE).strftime("%d.%m %H:%М")
+	dt = datetime.fromtimestamp(ts, tz=TIMEZONE).strftime("%d.%m %H:%M")
 	sign = "➕" if ttype == "income" else "➖"
 	return f"{dt} {sign} {fmt_amount(amount,cur)} {cur.upper()} • {cat} • {note or '-'}"
 
@@ -589,14 +671,14 @@ async def pdf_report_month(uid: int) -> Optional[Tuple[io.BytesIO, str]]:
 		          (uid, start_ts, end_ts))
 		rows = c.fetchall(); con.close()
 		inc_uzs = sums.get(("income","uzs"),0.0); inc_usd = sums.get(("income","usd"),0.0)
-		exp_узs = sums.get(("expense","uzs"),0.0); exp_usd = sums.get(("expense","usd"),0.0)
+		exp_uzs = sums.get(("expense","uzs"),0.0); exp_usd = sums.get(("expense","usd"),0.0)
 		buf = io.BytesIO()
 		cnv = canvas.Canvas(buf, pagesize=A4)
 		cnv.setFont("DejaVuSans", 12)
 		w, h = A4
 		y = h - 40
 		cnv.drawString(40, y, "Отчёт за месяц"); y -= 20
-		cnv.drawString(40, y, f"Доход: UZS {fmt_amount(inc_uzs,'uzs')} | USD {fmt_amount(inc_usd,'usd')}"); y -= 18
+		cnv.drawString(40, y, f"Доход: UZS {fmt_amount(inc_узs,'uzs')} | USD {fmt_amount(inc_usd,'usd')}"); y -= 18
 		cnv.drawString(40, y, f"Расход: UZS {fmt_amount(exp_узs,'uzs')} | USD {fmt_amount(exp_usd,'usd')}"); y -= 18
 		cnv.drawString(40, y, f"Баланс: UZS {fmt_amount(inc_узs-exp_узs,'uzs')} | USD {fmt_amount(inc_usd-exp_usd,'usd')}"); y -= 28
 		cnv.drawString(40, y, "Операции:"); y -= 18
@@ -764,6 +846,30 @@ async def handle_reminders(update: Update, app: Application, uid: int, txt: str)
 		else:
 			await update.message.reply_text(f"Текущее напоминание: {row[0]:02d}:{row[1]:02d}. Измените сообщением «Напоминания HH:MM» или выключите «Напоминания выкл».")
 
+def debts_list_text(uid: int, direction: str) -> str:
+	rows = list_debts(uid, direction)
+	title = "Я должен" if direction == "i_owe" else "Мне должны"
+	if not rows:
+		return f"{title}: нет открытых долгов."
+	lines = [f"{title} (открытые):"]
+	for id_, who, amount, cur, note in rows:
+		lines.append(f"#{id_} {who} • {fmt_amount(amount,cur)} {cur.upper()} • {note or '-'}")
+	return "\n".join(lines)
+
+def balance_with_debts_text(uid: int) -> str:
+	uzs, usd = get_balance(uid)
+	iowe_uzs, iowe_usd, they_uzs, they_usd = debt_totals(uid)
+	net_uzs = uzs - iowe_uzs + they_uzs
+	net_usd = usd - iowe_usd + they_usd
+	lines = [
+		"Баланс:",
+		f"• Без долгов: UZS {fmt_amount(uzs,'uzs')} | USD {fmt_amount(usd,'usd')}",
+		f"• Я должен: UZS {fmt_amount(iowe_uzs,'uzs')} | USD {fmt_amount(iowe_usd,'usd')}",
+		f"• Мне должны: UZS {fmt_amount(they_uzs,'uzs')} | USD {fmt_amount(they_usd,'usd')}",
+		f"• Чистый баланс: UZS {fmt_amount(net_узs,'uzs')} | USD {fmt_amount(net_usd,'usd')}",
+	]
+	return "\n".join(lines)
+
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 	uid = update.effective_user.id
 	txt = (update.message.text or "").strip()
@@ -775,7 +881,92 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 	upsert_seen_user(uid, update.effective_user.first_name or "", update.effective_user.username)
 
-	# Пошаговый режим: если в процессе
+	# Debts flow
+	debts = context.user_data.get("debts")
+	if debts:
+		stage = debts.get("stage")
+		if txt == BACK_BTN:
+			context.user_data.pop("debts", None)
+			await update.message.reply_text("Главное меню.", reply_markup=MAIN_KB)
+			return
+		# Add debts
+		if stage == "menu":
+			await update.message.reply_text("Выберите действие:", reply_markup=debts_menu_kb())
+			return
+		if stage == "add_counterparty":
+			debts["counterparty"] = txt
+			debts["stage"] = "add_amount"
+			prompt = "Введите сумму и комментарий (например: 25 000 ужин)."
+			await update.message.reply_text(prompt, reply_markup=ReplyKeyboardMarkup([[KeyboardButton(BACK_BTN)]], resize_keyboard=True))
+			return
+		if stage == "add_amount":
+			amount = parse_amount(txt)
+			if amount is None:
+				await update.message.reply_text("Не понял сумму. Пример: 25 000 комментарий.", reply_markup=ReplyKeyboardMarkup([[KeyboardButton(BACK_BTN)]], resize_keyboard=True))
+				return
+			cur = detect_currency(txt)
+			note = txt
+			debt_id = add_debt(uid, debts["direction"], debts["counterparty"], amount, cur, note)
+			await update.message.reply_text(f"Долг сохранён (#{debt_id}): {debts['counterparty']} • {fmt_amount(amount,cur)} {cur.upper()}",
+			                                reply_markup=debts_menu_kb())
+			debts["stage"] = "menu"
+			return
+		if stage == "close_ask_id":
+			m = re.search(r"(\d+)", txt)
+			if not m:
+				await update.message.reply_text("Отправьте номер долга (например: 12).", reply_markup=debts_menu_kb()); return
+			ok = close_debt(uid, int(m.group(1)))
+			await update.message.reply_text("Долг закрыт." if ok else "Не удалось закрыть. Проверьте id и статус.", reply_markup=debts_menu_kb())
+			debts["stage"] = "menu"; return
+		if stage == "reduce_ask_id":
+			m = re.search(r"(\d+)", txt)
+			if not m:
+				await update.message.reply_text("Отправьте номер долга (например: 12).", reply_markup=debts_menu_kb()); return
+			debts["reduce_id"] = int(m.group(1))
+			debts["stage"] = "reduce_ask_amount"
+			await update.message.reply_text("На сколько уменьшить? (например: 50 000)", reply_markup=ReplyKeyboardMarkup([[KeyboardButton(BACK_BTN)]], resize_keyboard=True))
+			return
+		if stage == "reduce_ask_amount":
+			amount = parse_amount(txt)
+			if amount is None or amount <= 0:
+				await update.message.reply_text("Не понял сумму. Пример: 50 000", reply_markup=ReplyKeyboardMarkup([[KeyboardButton(BACK_BTN)]], resize_keyboard=True)); return
+			res = reduce_debt(uid, debts["reduce_id"], amount)
+			if not res:
+				await update.message.reply_text("Не удалось уменьшить. Проверьте id.", reply_markup=debts_menu_kb())
+			else:
+				new_amount, cur, status = res
+				if status == "closed":
+					await update.message.reply_text("Долг погашен полностью.", reply_markup=debts_menu_kb())
+				else:
+					await update.message.reply_text(f"Новый остаток: {fmt_amount(new_amount,cur)} {cur.upper()}", reply_markup=debts_menu_kb())
+			debts["stage"] = "menu"; debts.pop("reduce_id", None)
+			return
+
+	# Enter debts menu
+	if low == "долги":
+		context.user_data["debts"] = {"stage":"menu"}
+		await update.message.reply_text("Раздел «Долги».", reply_markup=debts_menu_kb())
+		return
+	if low == "➕ я должен":
+		context.user_data["debts"] = {"stage":"add_counterparty", "direction":"i_owe"}
+		await update.message.reply_text("Кому вы должны? Укажите имя/название.", reply_markup=ReplyKeyboardMarkup([[KeyboardButton(BACK_BTN)]], resize_keyboard=True))
+		return
+	if low == "➕ мне должны":
+		context.user_data["debts"] = {"stage":"add_counterparty", "direction":"they_owe"}
+		await update.message.reply_text("Кто должен вам? Укажите имя/название.", reply_markup=ReplyKeyboardMarkup([[KeyboardButton(BACK_BTN)]], resize_keyboard=True))
+		return
+	if low == "📜 я должен":
+		await update.message.reply_text(debts_list_text(uid, "i_owe"), reply_markup=debts_menu_kb()); return
+	if low == "📜 мне должны":
+		await update.message.reply_text(debts_list_text(uid, "they_owe"), reply_markup=debts_menu_kb()); return
+	if low == "✖️ закрыть долг":
+		context.user_data["debts"] = {"stage":"close_ask_id"}
+		await update.message.reply_text("Отправьте номер долга для закрытия (например: 12).", reply_markup=debts_menu_kb()); return
+	if low == "➖ уменьшить долг":
+		context.user_data["debts"] = {"stage":"reduce_ask_id"}
+		await update.message.reply_text("Отправьте номер долга для уменьшения (например: 12).", reply_markup=debts_menu_kb()); return
+
+	# Existing step-by-step tx flow
 	flow = context.user_data.get("flow")
 	if flow:
 		stage = flow.get("stage")
@@ -807,7 +998,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 				await maybe_warn_budget(update, uid, cat, cur)
 			return
 
-	# Вход в пошаговый режим из главного меню
+	# Enter tx step-by-step
 	if low == "➖ расход" or low == "расход":
 		context.user_data["flow"] = {"stage":"choose_category","ttype":"expense"}
 		await update.message.reply_text("Выбери категорию расхода:", reply_markup=categories_kb("expense"))
@@ -817,26 +1008,21 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 		await update.message.reply_text("Выбери категорию дохода:", reply_markup=categories_kb("income"))
 		return
 
-	# Остальной функционал
+	# Core features
 	if "баланс" in low:
-		uzs, usd = get_balance(uid)
-		await update.message.reply_text(f"Баланс:\n• UZS: {fmt_amount(uzs,'uzs')}\n• USD: {fmt_amount(usd,'usd')}", reply_markup=MAIN_KB)
+		await update.message.reply_text(balance_with_debts_text(uid), reply_markup=MAIN_KB)
 		return
-
 	if "история" in low:
 		await send_history(update, uid, 10); return
-
 	if "отчёт" in low or "отчет" in low:
 		msg = await month_report_text(uid)
 		await update.message.reply_text(msg, reply_markup=MAIN_KB); return
-
 	if "экспорт" in low:
 		csv_b, csv_name, xl_b, xl_name = export_month(uid)
 		await update.message.reply_document(document=csv_b, filename=csv_name)
 		if xl_name:
 			await update.message.reply_document(document=xl_b, filename=xl_name)
 		return
-
 	if "pdf" in low:
 		pdf = await pdf_report_month(uid)
 		if pdf:
@@ -845,8 +1031,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 		else:
 			await update.message.reply_text("Не удалось сформировать PDF сейчас.")
 		return
-
-	if "отмен" in low and "flow" not in context.user_data:
+	if "отмен" in low and "flow" not in context.user_data and "debts" not in context.user_data:
 		row = undo_last(uid)
 		if not row:
 			await update.message.reply_text("Нечего отменять.")
@@ -854,32 +1039,27 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 			_, ttype, amount, cur, cat, note = row
 			await update.message.reply_text(f"Удалено: {fmt_amount(amount,cur)} {cur.upper()} • {cat}")
 		return
-
 	if "пользовател" in low:
 		await update.message.reply_text(users_summary_text(), reply_markup=MAIN_KB); return
-
 	if "курс" in low:
 		rate = await fetch_usd_uzs_rate()
 		uzs, usd = get_balance(uid)
 		lines = []
 		if rate:
-			total_uzs = uzs + usd * rate
+			total_узs = uzs + usd * rate
 			total_usd = usd + (uzs / rate)
 			lines.append(f"Курс: 1 USD = {rate:,.0f} UZS".replace(",", " "))
-			lines.append(f"Сводный баланс: ≈ {fmt_amount(total_uzs,'uzs')} UZS | ≈ {total_usd:.2f} USD")
+			lines.append(f"Сводный баланс: ≈ {fmt_amount(total_узs,'uzs')} UZS | ≈ {total_usd:.2f} USD")
 		else:
 			lines.append("Не удалось получить курс. Показываю локальный баланс.")
 		lines.append(f"Баланс: UZS {fmt_amount(uzs,'uzs')} | USD {fmt_amount(usd,'usd')}")
 		await update.message.reply_text("\n".join(lines)); return
-
 	if "бюджет" in low:
 		await handle_budgets(update, uid, txt); return
-
 	if "редакт" in low:
 		await send_history(update, uid, 5)
 		await update.message.reply_text("Отправьте команду вида: «id=123 сумма=25000» или «id 123 категория=Еда».")
 		return
-
 	if "id" in low or low.startswith("#"):
 		cmd = parse_edit_command(txt)
 		if cmd:
@@ -887,25 +1067,20 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 			ok = update_tx(uid, tx_id, new_amount, new_cat)
 			await update.message.reply_text("Обновлено." if ok else "Не удалось обновить. Проверьте id.")
 			return
-
 	if "повтор" in low:
 		await handle_recurring(update, uid, txt); return
-
 	if "аналит" in low:
 		msg = await analytics_text(uid)
 		await update.message.reply_text(msg); return
-
 	if "автодат" in low:
 		await handle_autodates(update); return
-
 	if low in ("сегодня","вчера","неделя","на этой неделе"):
 		msg = await period_summary_text(uid, low)
 		await update.message.reply_text(msg); return
-
 	if "напомин" in low:
 		await handle_reminders(update, context.application, uid, txt); return
 
-	# Свободный ввод: попытка распознать операцию
+	# Free text tx
 	ttype, amount, cur, cat = ai_classify_finance(txt)
 	if amount is not None:
 		tx_id = add_tx(uid, ttype, amount, cur, cat, txt)
@@ -914,22 +1089,19 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 			await maybe_warn_budget(update, uid, cat, cur)
 		return
 
-	await update.message.reply_text("Принято ✅ Напиши: «такси 25 000», или используй кнопки «➖ Расход / ➕ Доход».", reply_markup=MAIN_KB)
+	await update.message.reply_text("Принято ✅ Напиши: «такси 25 000», или используй кнопки «➖ Расход / ➕ Доход / Долги».", reply_markup=MAIN_KB)
 
 async def unknown_cmd(update: Update, _: ContextTypes.DEFAULT_TYPE):
 	await update.message.reply_text("Нажми кнопку или напиши траты/доход.", reply_markup=MAIN_KB)
 
 def main():
-	token = os.environ.get("BOT_TOKEN", DEFAULT_BOT_TOKEN)
+	token = DEFAULT_BOT_TOKEN
 	app = Application.builder().token(token).build()
 	app.add_handler(CommandHandler("start", start))
 	app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 	app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
-
-	# Планировщик задач (повторы/напоминания)
 	schedule_daily_jobs(app)
 	load_and_schedule_all_reminders(app)
-
 	log.info("Starting polling")
 	app.run_polling(drop_pending_updates=True)
 
