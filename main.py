@@ -1,5 +1,5 @@
-import os, re, sqlite3, time, logging
-from datetime import datetime
+import os, re, sqlite3, time, logging, csv, io
+from datetime import datetime, timedelta
 from typing import Optional, Tuple, List
 from zoneinfo import ZoneInfo
 from threading import Thread
@@ -25,12 +25,14 @@ BALANCE_BTN = "💰 Баланс"
 HISTORY_BTN = "📜 История"
 REPORT_BTN = "📊 Отчёт (месяц)"
 DEBTS_BTN = "💼 Долги"
+EXPORT_BTN = "Экспорт 📂"
 
 MAIN_KB = ReplyKeyboardMarkup(
     [
         [KeyboardButton(INCOME_BTN), KeyboardButton(EXPENSE_BTN)],
         [KeyboardButton(BALANCE_BTN), KeyboardButton(HISTORY_BTN)],
         [KeyboardButton(REPORT_BTN), KeyboardButton(DEBTS_BTN)],
+        [KeyboardButton(EXPORT_BTN)],
     ],
     resize_keyboard=True
 )
@@ -111,7 +113,7 @@ def parse_amount(t: str) -> Optional[float]:
     return float(f"{num}.{frac}") if frac else float(num)
 
 def parse_debt_input(t: str) -> Tuple[Optional[float], Optional[str], str]:
-    # Формат: "<amount> [currency] <counterparty...>"
+    # "<amount> [currency] <counterparty...>"
     t = t.strip()
     m = re.match(r"^\s*(\d{1,3}(?:[ \u00A0,\.]\d{3})+|\d+)(?:[.,](\d{1,2}))?\s*([A-Za-zА-Яа-яЁё$]+)?\s*(.*)$", t)
     if not m:
@@ -126,7 +128,6 @@ def parse_debt_input(t: str) -> Tuple[Optional[float], Optional[str], str]:
             currency = "usd" if (cur_low in {"usd","$","дол","долл","доллар","доллары","долларов","бакс","баксы","dollar"}) else "uzs"
     if not currency:
         currency = detect_currency(t)
-    # Имя/комментарий: остаток без валютных слов
     name = rest.strip()
     if name:
         toks = [w for w in re.findall(r"[@A-Za-zА-Яа-яЁё0-9\-_.]+", name)]
@@ -217,6 +218,82 @@ def debt_reduce_or_close(uid: int, debt_id: int, reduce_amount: Optional[float] 
         con.commit(); con.close()
         return True, f"➖ Сумма долга #{debt_id} уменьшена: {fmt_amount(new_amount, currency)}"
 
+# ---------------- Reports/AI helpers ----------------
+def month_bounds_now() -> Tuple[int, int]:
+    now = datetime.now(TIMEZONE)
+    start = datetime(now.year, now.month, 1, 0, 0, 0, tzinfo=TIMEZONE)
+    if now.month == 12:
+        next_month = datetime(now.year + 1, 1, 1, tzinfo=TIMEZONE)
+    else:
+        next_month = datetime(now.year, now.month + 1, 1, tzinfo=TIMEZONE)
+    return int(start.timestamp()), int(next_month.timestamp()) - 1
+
+def month_expenses_by_category(uid: int) -> List[tuple]:
+    start, end = month_bounds_now()
+    con = sqlite3.connect(DB_PATH); c = con.cursor()
+    c.execute("""SELECT category, currency, COALESCE(SUM(amount),0) as s
+                 FROM tx
+                 WHERE user_id=? AND ttype='expense' AND ts BETWEEN ? AND ?
+                 GROUP BY category, currency
+                 ORDER BY s DESC""", (uid, start, end))
+    rows = c.fetchall(); con.close()
+    return rows
+
+def generate_ai_tip(uid: int) -> str:
+    rows = month_expenses_by_category(uid)
+    if not rows:
+        return "Расходов в этом месяце пока нет."
+    # Приоритет UZS, затем USD
+    rows_sorted = sorted(rows, key=lambda r: (r[1] != "uzs", -r[2]))
+    top_cat, top_cur, top_sum = rows_sorted[0]
+    return f"Больше всего трат в этом месяце в категории «{top_cat}»: {fmt_amount(top_sum, top_cur)}."
+
+def month_report_text(uid: int) -> str:
+    start, end = month_bounds_now()
+    con = sqlite3.connect(DB_PATH); c = con.cursor()
+    c.execute("""SELECT currency,
+                        SUM(CASE WHEN ttype='income' THEN amount ELSE 0 END) as inc,
+                        SUM(CASE WHEN ttype='expense' THEN amount ELSE 0 END) as exp
+                 FROM tx WHERE user_id=? AND ts BETWEEN ? AND ?
+                 GROUP BY currency""", (uid, start, end))
+    lines = [f"📊 Отчёт за {datetime.fromtimestamp(start, tz=TIMEZONE).strftime('%m.%Y')}"]
+    rows = c.fetchall()
+    if not rows:
+        con.close()
+        return lines[0] + "\nНет операций за месяц."
+    for cur, inc, exp in rows:
+        inc = inc or 0.0; exp = exp or 0.0
+        lines.append(f"• Доходы: {fmt_amount(inc, cur)}")
+        lines.append(f"• Расходы: {fmt_amount(exp, cur)}")
+        lines.append(f"• Итог: {fmt_amount(inc - exp, cur)}")
+        lines.append("")
+    c.execute("""SELECT category, currency, SUM(amount) as s
+                 FROM tx
+                 WHERE user_id=? AND ttype='expense' AND ts BETWEEN ? AND ?
+                 GROUP BY category, currency
+                 ORDER BY s DESC LIMIT 10""", (uid, start, end))
+    cats = c.fetchall(); con.close()
+    if cats:
+        lines.append("Топ расходов по категориям:")
+        for cat, cur, s in cats:
+            lines.append(f"- {cat}: {fmt_amount(s, cur)}")
+    return "\n".join(lines)
+
+async def export_month_csv(uid: int, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    start, end = month_bounds_now()
+    con = sqlite3.connect(DB_PATH); c = con.cursor()
+    c.execute("""SELECT id, ts, ttype, amount, currency, category, note
+                 FROM tx WHERE user_id=? AND ts BETWEEN ? AND ?
+                 ORDER BY ts ASC""", (uid, start, end))
+    rows = c.fetchall(); con.close()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["id","datetime","type","amount","currency","category","note"])
+    for rid, ts, ttype, amount, currency, category, note in rows:
+        w.writerow([rid, datetime.fromtimestamp(ts, tz=TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"), ttype, amount, currency, category, note or ""])
+    data = buf.getvalue().encode("utf-8")
+    await context.bot.send_document(chat_id=chat_id, document=io.BytesIO(data), filename="transactions_month.csv")
+
 # ---------------- Balance summary + pin ----------------
 def build_balance_summary(uid: int) -> str:
     now = datetime.now(TIMEZONE)
@@ -224,9 +301,12 @@ def build_balance_summary(uid: int) -> str:
     net = net_by_currency(uid)
     debts = debt_totals_by_currency(uid)
 
-    def fmt_multi(label: str, dd: dict, sign: int = +1) -> str:
+    def fmt_multi(label: str, dd: dict) -> str:
         parts = []
-        for cur in sorted(set(list(net.keys()) + list(dd.keys()))):
+        currencies = set(net.keys()) | set(dd.keys())
+        if debts:
+            currencies |= set(debts.keys())
+        for cur in sorted(currencies):
             owes = debts.get(cur, {}).get("owes", 0.0)
             owed = debts.get(cur, {}).get("owed", 0.0)
             if label == "Баланс":
@@ -256,7 +336,9 @@ def build_balance_summary(uid: int) -> str:
 async def send_and_pin_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     uid = update.effective_user.id
-    text = build_balance_summary(uid)
+    summary = build_balance_summary(uid)
+    tip = generate_ai_tip(uid)
+    text = summary + "\n\n" + f"💡 {tip}"
     msg = await context.bot.send_message(chat_id=chat_id, text=text)
     try:
         await context.bot.unpin_all_chat_messages(chat_id)
@@ -510,7 +592,10 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await history_cmd(update, context)
         return
     if txt == REPORT_BTN:
-        await update.message.reply_text("Отчёт пока недоступен.")
+        await update.message.reply_text(month_report_text(uid))
+        return
+    if txt == EXPORT_BTN:
+        await export_month_csv(uid, context, update.effective_chat.id)
         return
 
     # ---------- Free-form fallback ----------
@@ -551,7 +636,6 @@ def main():
     token = os.environ.get("BOT_TOKEN")
     if not token:
         raise RuntimeError("BOT_TOKEN is not set in environment variables")
-    # health server for Railway Web
     Thread(target=run_health_server, daemon=True).start()
     app = build_app(token)
     log.info("Starting polling")
